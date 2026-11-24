@@ -1,0 +1,5 @@
+These were supplied as illustrative screenshots for the campaign.
+DO NOT publish them without verifying they show the exact same sponsor and terms as the active network link.
+The SMS image references Winna Play Daily 200, while the subscription page references Tapestry Flash at N50/day auto-renewal.
+To use verified screenshots, send /admin to the bot and upload a Telegram photo into each named image slot.
+The bot does not auto-publish these three reference files.

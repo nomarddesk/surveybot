@@ -1,4 +1,4 @@
-"""Network-specific, consent-first Telegram sponsor-promotion bot.
+"""Network-specific Telegram sponsor-promotion bot with clear billing disclosure.
 
 Designed for one Railway worker with a Railway PostgreSQL database.
 Never requests login codes, OTPs, PINs, passwords, or unredacted SMS messages.
@@ -47,6 +47,7 @@ class OfferFlow(StatesGroup):
 class AdminFlow(StatesGroup):
     edit_url = State()
     guide_photo = State()
+    edit_billing = State()
 
 
 def keyboard(*rows: list[tuple[str, str]]) -> InlineKeyboardMarkup:
@@ -68,7 +69,15 @@ def admin_keyboard() -> InlineKeyboardMarkup:
         [("Edit Glo link", "admin:edit:GLO")],
         [("Edit Airtel link", "admin:edit:AIRTEL")],
         [("Edit official terms link", "admin:edit:TERMS")],
-        [("Set instruction image", "admin:guide"), ("Clear image", "admin:clear_guide")],
+        [("MTN billing details", "admin:billing:MTN")],
+        [("Glo billing details", "admin:billing:GLO")],
+        [("Airtel billing details", "admin:billing:AIRTEL")],
+        [("Set subscription step image", "admin:guide:SUBSCRIBE")],
+        [("Set success step image", "admin:guide:SUCCESS")],
+        [("Set SMS proof example", "admin:guide:SMS")],
+        [("Clear subscription image", "admin:clear:SUBSCRIBE")],
+        [("Clear success image", "admin:clear:SUCCESS")],
+        [("Clear SMS example", "admin:clear:SMS")],
         [("Pending reviews", "admin:pending"), ("Statistics", "admin:stats")],
     )
 
@@ -168,10 +177,10 @@ async def create_tables() -> None:
 async def start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
-        "Welcome to the network sponsor promotion.\n\n"
-        "A promotional prize of up to ₦300,000 is possible ONLY if confirmed "
-        "by the sponsor's published terms. This is not guaranteed income or a promised payout.\n\n"
-        "Select your mobile network to view the offer and its costs:",
+        "🎁 Welcome to Network Rewards!\n\n"
+        "You’re one step away from entering for a chance to win up to ₦300,000. "
+        "Rewards are subject to the official offer rules, not guaranteed.\n\n"
+        "Select your mobile network:",
         reply_markup=network_keyboard(),
     )
 
@@ -184,9 +193,13 @@ async def network_chosen(query: CallbackQuery, state: FSMContext, bot: Bot) -> N
         return
     link = await setting("URL_" + network)
     terms = await setting("URL_TERMS")
-    if not link or not terms:
-        await safe_send(bot, query.from_user.id,
-                        "This offer isn't ready yet. The sponsor link and official terms must be published first.")
+    billing = await setting("BILLING_" + network)
+    if not link or not terms or not billing:
+        await safe_send(
+            bot, query.from_user.id,
+            "This network offer is not ready. The administrator must set its link, "
+            "subscription charge/renewal details and official terms first."
+        )
         return
     await state.clear()
     await state.set_state(OfferFlow.offer)
@@ -198,19 +211,54 @@ async def network_chosen(query: CallbackQuery, state: FSMContext, bot: Bot) -> N
             pass
     await bot.send_message(
         query.from_user.id,
-        f"Network: {network}\n\n"
-        "Important: The sponsor asks participants to have at least ₦250 airtime. "
-        "A registration or mobile subscription may charge airtime or renew automatically. "
-        "Confirm the actual fee, renewal schedule and cancellation method on the sponsor page.\n\n"
-        "Do not share SMS login/verification codes, PINs, passwords or unredacted private messages. "
-        "Your evidence, if submitted, will be viewed by the campaign administrators. "
-        "Removing your bot entry does not cancel a sponsor subscription.\n\n"
-        f"Official terms: {terms}\n\n"
-        "Only continue if you understand the sponsor's conditions. "
-        "A prize or payment is not guaranteed.",
-        reply_markup=keyboard([("I understand — view sponsor", "offer:consent")],
-                              [("Choose another network", "offer:back")]),
+        f"📱 {network} — Step 1 of 3\n\n"
+        "Open the sponsor website and enter your mobile number. "
+        "You may need at least ₦250 airtime.\n\n"
+        f"Subscription charge and renewal: {billing}\n"
+        "Signing up may deduct airtime. Cancelling a bot entry does not cancel a mobile subscription.\n\n"
+        "🏆 Prize entry is subject to eligibility and verification; a prize is not guaranteed.\n"
+        f"Official terms: {terms}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"🌐 Open {network} sponsor offer", url=link)],
+            [InlineKeyboardButton(text="🔄 Choose another network", callback_data="offer:back")],
+        ]),
     )
+    # The short picture walkthrough runs separately so Telegram callbacks stay responsive.
+    asyncio.create_task(show_walkthrough(bot, query.from_user.id, state, network, link, billing, terms))
+
+
+async def show_walkthrough(bot: Bot, user_id: int, state: FSMContext,
+                           network: str, link: str, billing: str, terms: str) -> None:
+    """Show each configurable guide for three seconds, then present the offer."""
+    guides = (
+        ("GUIDE_SUBSCRIBE_FILE_ID", "Step 2 of 3: Check the subscription page, price and auto-renewal setting."),
+        ("GUIDE_SUCCESS_FILE_ID", "Step 3 of 3: Complete the sponsor page and wait for its confirmation."),
+    )
+    for key, caption in guides:
+        if await state.get_state() != OfferFlow.offer.state:
+            return
+        if (await state.get_data()).get("network") != network:
+            return
+        guide_file = await setting(key)
+        if not guide_file and key == "GUIDE_SUBSCRIBE_FILE_ID":
+            guide_file = await setting("GUIDE_FILE_ID")  # Existing image from V1.
+        try:
+            if guide_file:
+                guide_message = await bot.send_photo(user_id, guide_file, caption=caption)
+            else:
+                guide_message = await bot.send_message(user_id, caption)
+            await asyncio.sleep(3)
+            await safe_delete(bot, user_id, guide_message.message_id)
+        except Exception as exc:
+            LOG.warning("Could not display guide %s: %s", key, exc)
+            await asyncio.sleep(3)
+    if await state.get_state() != OfferFlow.offer.state:
+        return
+    if (await state.get_data()).get("network") != network:
+        return
+    offer = await bot.send_message(user_id, "Your sponsor offer is ready.")
+    asyncio.create_task(countdown(bot, user_id, offer.message_id, state,
+                                  network, link, billing, terms))
 
 
 @router.callback_query(F.data == "offer:back")
@@ -221,59 +269,34 @@ async def back_to_networks(query: CallbackQuery, state: FSMContext, bot: Bot) ->
 
 
 async def countdown(bot: Bot, user_id: int, message_id: int, state: FSMContext,
-                    network: str, link: str) -> None:
-    """A short visual guide timer; it does NOT create a deadline or payment."""
+                    network: str, link: str, billing: str, terms: str) -> None:
+    """Visual walkthrough timer; the sponsor link stays active after zero."""
     for remaining in (30, 25, 20, 15, 10, 5, 0):
         if await state.get_state() != OfferFlow.offer.state:
             return
-        text = (
-            f"{network} sponsor offer\n\n"
-            "Open the official sponsor site, read its terms, and register only if you agree.\n"
-            "If you proceed, keep a receipt with private details hidden.\n\n"
-            f"Walkthrough timer: {remaining}s (this is NOT an offer deadline)."
+        data = await state.get_data()
+        if data.get("network") != network:
+            return
+        caption = (
+            f"🎁 {network} OFFER\n\n"
+            "Tap the button to finish registering on the sponsor website.\n\n"
+            f"Charge/auto-renewal: {billing}\n"
+            "Rewards depend on the sponsor's rules and are not guaranteed.\n"
+            f"Terms: {terms}\n\n"
+            f"Guide countdown: {remaining}s (not an offer deadline)."
         )
         try:
             await bot.edit_message_text(
-                chat_id=user_id, message_id=message_id, text=text,
+                chat_id=user_id, message_id=message_id, text=caption,
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="Visit sponsor website", url=link)],
-                    [InlineKeyboardButton(text="I've completed registration", callback_data="offer:done")],
+                    [InlineKeyboardButton(text=f"🎁 OPEN {network} OFFER", url=link)],
+                    [InlineKeyboardButton(text="✅ I've completed registration", callback_data="offer:done")],
                 ]),
             )
         except Exception as exc:
-            LOG.debug("Timer update skipped: %s", exc)
+            LOG.warning("Offer countdown update skipped: %s", exc)
         if remaining:
             await asyncio.sleep(5)
-
-
-@router.callback_query(F.data == "offer:consent", StateFilter(OfferFlow.offer))
-async def show_offer(query: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    await query.answer()
-    user_id = query.from_user.id
-    data = await state.get_data()
-    network = data["network"]
-    link = await setting("URL_" + network)
-    if not link:
-        await bot.send_message(user_id, "This link is no longer available. Use /start to try again.")
-        return
-    if isinstance(query.message, Message):
-        try:
-            await query.message.edit_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-    guide_file = await setting("GUIDE_FILE_ID")
-    if guide_file:
-        try:
-            example = await bot.send_photo(
-                user_id, guide_file,
-                caption="Example of a completed sponsor registration receipt. "
-                        "Never include OTPs, security codes or full account details.",
-            )
-            asyncio.create_task(delete_after(bot, user_id, example.message_id, 3))
-        except Exception as exc:
-            LOG.warning("Instruction image not delivered: %s", exc)
-    offer = await bot.send_message(user_id, "Your sponsor link is ready.")
-    asyncio.create_task(countdown(bot, user_id, offer.message_id, state, network, link))
 
 
 async def delete_after(bot: Bot, chat_id: int, msg_id: int, delay: int) -> None:
@@ -285,31 +308,36 @@ async def delete_after(bot: Bot, chat_id: int, msg_id: int, delay: int) -> None:
 async def done_offer(query: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await query.answer()
     await state.set_state(OfferFlow.proof_one)
+    guide_file = await setting("GUIDE_SMS_FILE_ID")
+    if guide_file:
+        try:
+            guide = await bot.send_photo(
+                query.from_user.id, guide_file,
+                caption="Example: successful carrier subscription confirmation SMS.",
+            )
+            asyncio.create_task(delete_after(bot, query.from_user.id, guide.message_id, 3))
+        except Exception as exc:
+            LOG.warning("Could not display SMS example: %s", exc)
     await bot.send_message(
         query.from_user.id,
-        "Upload a screenshot of the successful registration/transaction receipt.\n\n"
-        "Before uploading, HIDE all OTPs, SMS verification codes, PINs, full phone numbers "
-        "and other sensitive details. Never send a login or account-activation screenshot.",
+        "📸 Upload your proof here.\n\n"
+        "Send a screenshot of the *successful subscription confirmation SMS* "
+        "(not a verification code or login OTP). "
+        "Hide personal messages and any security codes before sending. "
+        "Your screenshot will be sent to campaign administrators.",
+        parse_mode="Markdown",
     )
 
 
 @router.message(StateFilter(OfferFlow.proof_one), F.photo)
 async def first_proof(message: Message, state: FSMContext, bot: Bot) -> None:
     assert message.from_user is not None
-    photo_id = message.photo[-1].file_id
-    await state.update_data(proof_file_id=photo_id)
-    await state.set_state(OfferFlow.proof_two)
-    await message.answer("Proof received. It will be reviewed; this is not confirmation of a reward.")
+    await state.update_data(proof_file_id=message.photo[-1].file_id)
+    await message.answer("✅ Screenshot received. The team will check your entry.")
     await asyncio.sleep(2)
-    if await state.get_state() != OfferFlow.proof_two.state:
+    if await state.get_state() != OfferFlow.proof_one.state:
         return
-    await bot.send_message(
-        message.chat.id,
-        "Optional: upload a REDACTED carrier billing/registration receipt, if one was issued. "
-        "Do not submit an OTP, SMS login code, password-reset message or security confirmation.\n\n"
-        "You may skip this step.",
-        reply_markup=keyboard([("Skip extra receipt", "proof:skip")]),
-    )
+    await show_reward_choices(bot, message.from_user.id, state)
 
 
 @router.message(StateFilter(OfferFlow.proof_one))
@@ -321,7 +349,7 @@ async def show_reward_choices(bot: Bot, user_id: int, state: FSMContext) -> None
     await state.set_state(OfferFlow.reward)
     await bot.send_message(
         user_id,
-        "If your entry qualifies under the official promotion terms, which reward would you prefer?\n\n"
+        "🎁 Which reward would you prefer if selected as a winner?\n\n"
         "This is a preference only. Selection does not confirm winning or an award of ₦10,000.",
         reply_markup=keyboard(
             [("Cash preference", "reward:cash")],
@@ -522,12 +550,29 @@ async def admin_action(query: CallbackQuery, state: FSMContext, bot: Bot) -> Non
         await state.set_state(AdminFlow.edit_url)
         await state.update_data(edit_key="URL_" + name)
         await bot.send_message(query.from_user.id, f"Send the new HTTPS URL for {name}. Use /admin to cancel.")
-    elif action[1] == "guide":
+    elif action[1] == "billing" and len(action) > 2 and action[2] in NETWORKS:
+        network = action[2]
+        await state.set_state(AdminFlow.edit_billing)
+        await state.update_data(billing_key="BILLING_" + network)
+        await bot.send_message(
+            query.from_user.id,
+            f"Send the ACTUAL {network} charge and auto-renewal/cancellation details "
+            "(example: ₦50/day, auto-renews daily; cancel by ...). "
+            "Verify this against the active sponsor landing page. /admin to cancel."
+        )
+    elif action[1] == "guide" and len(action) > 2 and action[2] in ("SUBSCRIBE", "SUCCESS", "SMS"):
+        slot = action[2]
         await state.set_state(AdminFlow.guide_photo)
-        await bot.send_message(query.from_user.id, "Upload the instruction image to display for 3 seconds.")
-    elif action[1] == "clear_guide":
-        await save_setting("GUIDE_FILE_ID", "")
-        await bot.send_message(query.from_user.id, "Instruction image cleared.")
+        await state.update_data(guide_key=f"GUIDE_{slot}_FILE_ID")
+        await bot.send_message(query.from_user.id, f"Upload {slot} step image to display for 3 seconds.")
+    elif action[1] == "clear" and len(action) > 2 and action[2] in ("SUBSCRIBE", "SUCCESS", "SMS"):
+        key = f"GUIDE_{action[2]}_FILE_ID"
+        await save_setting(key, "")
+        if action[2] == "SUBSCRIBE":
+            # Also clear the V1 image fallback so the removed image won't reappear.
+            await save_setting("GUIDE_FILE_ID", "")
+        await bot.send_message(query.from_user.id, f"Removed {action[2]} image.",
+                               reply_markup=admin_keyboard())
     elif action[1] == "stats":
         assert pool is not None
         async with pool.acquire() as db:
@@ -570,13 +615,28 @@ async def admin_new_url(message: Message, state: FSMContext) -> None:
     await message.answer(f"Updated {key} successfully.", reply_markup=admin_keyboard())
 
 
+@router.message(StateFilter(AdminFlow.edit_billing), F.text)
+async def admin_new_billing(message: Message, state: FSMContext) -> None:
+    if not message.from_user or not is_admin(message.from_user.id):
+        return
+    details = (message.text or "").strip()
+    if len(details) < 15 or len(details) > 240:
+        await message.answer("Provide 15–240 characters with the cost, renewal and cancellation instructions.")
+        return
+    key = (await state.get_data())["billing_key"]
+    await save_setting(key, details)
+    await state.clear()
+    await message.answer(f"Saved {key}.", reply_markup=admin_keyboard())
+
+
 @router.message(StateFilter(AdminFlow.guide_photo), F.photo)
 async def admin_new_guide(message: Message, state: FSMContext) -> None:
     if not message.from_user or not is_admin(message.from_user.id):
         return
-    await save_setting("GUIDE_FILE_ID", message.photo[-1].file_id)
+    key = (await state.get_data()).get("guide_key", "GUIDE_SUBSCRIBE_FILE_ID")
+    await save_setting(key, message.photo[-1].file_id)
     await state.clear()
-    await message.answer("Instruction image saved.", reply_markup=admin_keyboard())
+    await message.answer(f"Saved {key}.", reply_markup=admin_keyboard())
 
 
 @router.callback_query(F.data.startswith("review:"))
