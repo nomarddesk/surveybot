@@ -20,7 +20,7 @@ from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, FSInputFile
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -31,6 +31,13 @@ ADMIN_IDS = {int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.
 NETWORKS = ("MTN", "GLO", "AIRTEL")
 REVIEW_HOURS = 24
 DATA_RETENTION_DAYS = 30
+AUTO_REMINDER_HOURS = 2
+DEFAULT_REMINDER_TEXT = (
+    "🎁 We give away a total of up to ₦1,000,000 daily.\n\n"
+    "Enter for a chance to win now. Before continuing, review the sponsor offer carefully "
+    "because some network offers may include airtime charges or auto-renewal.\n\n"
+    "Tap below to verify your network and continue your entry."
+)
 
 router = Router()
 pool: asyncpg.Pool | None = None
@@ -48,6 +55,7 @@ class AdminFlow(StatesGroup):
     edit_url = State()
     guide_photo = State()
     edit_billing = State()
+    edit_reminder_text = State()
 
 
 def keyboard(*rows: list[tuple[str, str]]) -> InlineKeyboardMarkup:
@@ -78,6 +86,9 @@ def admin_keyboard() -> InlineKeyboardMarkup:
         [("Clear subscription image", "admin:clear:SUBSCRIBE")],
         [("Clear success image", "admin:clear:SUCCESS")],
         [("Clear SMS example", "admin:clear:SMS")],
+        [("Set reminder image", "admin:guide:REMINDER")],
+        [("Clear reminder image", "admin:clear:REMINDER")],
+        [("Edit reminder text", "admin:remindertext")],
         [("Pending reviews", "admin:pending"), ("Statistics", "admin:stats")],
     )
 
@@ -131,6 +142,45 @@ async def save_setting(key: str, value: str) -> None:
         )
 
 
+async def schedule_auto_reminder(user_id: int, stage: str = "started") -> None:
+    assert pool is not None
+    async with pool.acquire() as db:
+        await db.execute(
+            """
+            INSERT INTO reminder_subscribers (user_id, stage, remind_at, reminder_sent, updated_at)
+            VALUES ($1, $2, NOW() + INTERVAL '2 hours', FALSE, NOW())
+            ON CONFLICT (user_id) DO UPDATE SET
+                stage=EXCLUDED.stage,
+                remind_at=EXCLUDED.remind_at,
+                reminder_sent=FALSE,
+                updated_at=NOW()
+            """,
+            user_id, stage,
+        )
+
+
+async def reminder_text() -> str:
+    return (await setting("REMINDER_TEXT")) or DEFAULT_REMINDER_TEXT
+
+
+async def send_reminder_message(bot: Bot, user_id: int, text: str) -> None:
+    reminder_file_id = await setting("REMINDER_IMAGE_FILE_ID")
+    try:
+        if reminder_file_id:
+            await bot.send_photo(user_id, reminder_file_id, caption=text, reply_markup=network_keyboard())
+            return
+    except Exception as exc:
+        LOG.warning("Reminder file_id send failed; falling back to bundled image: %s", exc)
+    local_path = os.path.join(os.path.dirname(__file__), "assets", "reminder_credit_alert.png")
+    if os.path.exists(local_path):
+        try:
+            await bot.send_photo(user_id, FSInputFile(local_path), caption=text, reply_markup=network_keyboard())
+            return
+        except Exception as exc:
+            LOG.warning("Bundled reminder image send failed: %s", exc)
+    await safe_send(bot, user_id, text, reply_markup=network_keyboard())
+
+
 async def safe_delete(bot: Bot, chat_id: int, message_id: int) -> None:
     try:
         await bot.delete_message(chat_id=chat_id, message_id=message_id)
@@ -170,12 +220,24 @@ async def create_tables() -> None:
             CREATE INDEX IF NOT EXISTS submissions_user_idx ON submissions(user_id);
             CREATE INDEX IF NOT EXISTS submissions_reminder_idx
                 ON submissions(reminder_at) WHERE reminder_sent=FALSE;
+            CREATE TABLE IF NOT EXISTS reminder_subscribers (
+                user_id BIGINT PRIMARY KEY,
+                stage TEXT NOT NULL DEFAULT 'started',
+                remind_at TIMESTAMPTZ NOT NULL,
+                reminder_sent BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS reminder_subscribers_due_idx
+                ON reminder_subscribers(remind_at) WHERE reminder_sent=FALSE;
         """)
 
 
 @router.message(CommandStart())
 async def start(message: Message, state: FSMContext) -> None:
     await state.clear()
+    if message.from_user:
+        await schedule_auto_reminder(message.from_user.id, "started")
     await message.answer(
         "🎁 Welcome to Network Rewards!\n\n"
         "You’re one step away from entering for a chance to win up to ₦300,000. "
@@ -430,15 +492,12 @@ async def save_submission(message: Message, state: FSMContext, bot: Bot) -> None
         """, message.from_user.id, data["network"], data["proof_file_id"],
             data.get("extra_file_id"), data["reward_preference"], phone)
     await state.clear()
+    await schedule_auto_reminder(message.from_user.id, "completed")
     await message.answer(
         f"Entry #{submission_id} received. Our team aims to review your submission "
         "within 24 hours; reward eligibility is not guaranteed. "
         "We will notify you when an admin approves or declines the entry.\n\n"
-        "Would you like one reminder about your review status in 2 hours?",
-        reply_markup=keyboard(
-            [("Yes, remind me once", f"reminder:{submission_id}")],
-            [("No reminder", "reminder:no")],
-        ),
+        "An automatic follow-up reminder will be sent to you in about 2 hours.",
     )
     username = "@" + message.from_user.username if message.from_user.username else "(none)"
     for admin in ADMIN_IDS:
@@ -468,37 +527,6 @@ async def save_submission(message: Message, state: FSMContext, bot: Bot) -> None
 @router.message(StateFilter(OfferFlow.phone))
 async def missing_phone(message: Message) -> None:
     await message.answer("Please enter the phone number as text (not a contact card).")
-
-
-@router.callback_query(F.data == "reminder:no")
-async def skip_reminder(query: CallbackQuery) -> None:
-    await query.answer("No reminder will be sent.")
-    if isinstance(query.message, Message):
-        try:
-            await query.message.edit_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-
-
-@router.callback_query(F.data.startswith("reminder:"))
-async def opt_in_reminder(query: CallbackQuery) -> None:
-    try:
-        submission_id = int((query.data or "").split(":", 1)[1])
-    except ValueError:
-        await query.answer("Invalid submission.")
-        return
-    assert pool is not None
-    async with pool.acquire() as db:
-        result = await db.execute("""
-            UPDATE submissions SET reminder_at=NOW()+INTERVAL '2 hours', reminder_sent=FALSE
-            WHERE id=$1 AND user_id=$2 AND status='pending' AND reminder_at IS NULL
-        """, submission_id, query.from_user.id)
-    await query.answer("One-time status reminder enabled." if result.endswith("1") else "No eligible pending entry.")
-    if isinstance(query.message, Message):
-        try:
-            await query.message.edit_reply_markup(reply_markup=None)
-        except Exception:
-            pass
 
 
 @router.message(Command("privacy"))
@@ -560,12 +588,13 @@ async def admin_action(query: CallbackQuery, state: FSMContext, bot: Bot) -> Non
             "(example: ₦50/day, auto-renews daily; cancel by ...). "
             "Verify this against the active sponsor landing page. /admin to cancel."
         )
-    elif action[1] == "guide" and len(action) > 2 and action[2] in ("SUBSCRIBE", "SUCCESS", "SMS"):
+    elif action[1] == "guide" and len(action) > 2 and action[2] in ("SUBSCRIBE", "SUCCESS", "SMS", "REMINDER"):
         slot = action[2]
         await state.set_state(AdminFlow.guide_photo)
         await state.update_data(guide_key=f"GUIDE_{slot}_FILE_ID")
-        await bot.send_message(query.from_user.id, f"Upload {slot} step image to display for 3 seconds.")
-    elif action[1] == "clear" and len(action) > 2 and action[2] in ("SUBSCRIBE", "SUCCESS", "SMS"):
+        label = "reminder image" if slot == "REMINDER" else f"{slot} step image"
+        await bot.send_message(query.from_user.id, f"Upload {label} to use in the bot.")
+    elif action[1] == "clear" and len(action) > 2 and action[2] in ("SUBSCRIBE", "SUCCESS", "SMS", "REMINDER"):
         key = f"GUIDE_{action[2]}_FILE_ID"
         await save_setting(key, "")
         if action[2] == "SUBSCRIBE":
@@ -573,6 +602,12 @@ async def admin_action(query: CallbackQuery, state: FSMContext, bot: Bot) -> Non
             await save_setting("GUIDE_FILE_ID", "")
         await bot.send_message(query.from_user.id, f"Removed {action[2]} image.",
                                reply_markup=admin_keyboard())
+    elif action[1] == "remindertext":
+        await state.set_state(AdminFlow.edit_reminder_text)
+        await bot.send_message(
+            query.from_user.id,
+            "Send the reminder text to broadcast automatically after 2 hours. /admin to cancel."
+        )
     elif action[1] == "stats":
         assert pool is not None
         async with pool.acquire() as db:
@@ -627,6 +662,21 @@ async def admin_new_billing(message: Message, state: FSMContext) -> None:
     await save_setting(key, details)
     await state.clear()
     await message.answer(f"Saved {key}.", reply_markup=admin_keyboard())
+
+
+
+
+@router.message(StateFilter(AdminFlow.edit_reminder_text), F.text)
+async def admin_reminder_text(message: Message, state: FSMContext) -> None:
+    if not message.from_user or not is_admin(message.from_user.id):
+        return
+    details = (message.text or "").strip()
+    if len(details) < 10 or len(details) > 500:
+        await message.answer("Provide 10–500 characters for the reminder text.")
+        return
+    await save_setting("REMINDER_TEXT", details)
+    await state.clear()
+    await message.answer("Saved reminder text.", reply_markup=admin_keyboard())
 
 
 @router.message(StateFilter(AdminFlow.guide_photo), F.photo)
@@ -695,7 +745,7 @@ async def reminder_worker(bot: Bot) -> None:
     while True:
         try:
             async with pool.acquire() as db:
-                # Claim due reminders safely, once; one worker replica is still recommended.
+                # Claim due review reminders for pending submissions.
                 rows = await db.fetch("""
                     UPDATE submissions SET reminder_sent=TRUE
                     WHERE id IN (
@@ -706,16 +756,29 @@ async def reminder_worker(bot: Bot) -> None:
                         FOR UPDATE SKIP LOCKED
                     ) RETURNING id,user_id
                 """)
+                promo_rows = await db.fetch("""
+                    UPDATE reminder_subscribers SET reminder_sent=TRUE, updated_at=NOW()
+                    WHERE user_id IN (
+                        SELECT user_id FROM reminder_subscribers
+                        WHERE reminder_sent=FALSE AND remind_at<=NOW()
+                        ORDER BY remind_at ASC LIMIT 100
+                        FOR UPDATE SKIP LOCKED
+                    ) RETURNING user_id, stage
+                """)
                 await db.execute("""
                     DELETE FROM submissions
                     WHERE created_at < NOW() - INTERVAL '30 days'
                 """)
+                await db.execute("""
+                    DELETE FROM reminder_subscribers
+                    WHERE created_at < NOW() - INTERVAL '30 days'
+                """)
             for row in rows:
-                await safe_send(
-                    bot, row["user_id"],
-                    f"Two-hour review reminder for entry #{row['id']}: your submission "
-                    "is still awaiting admin review. You do not need to subscribe or pay again."
-                )
+                text = await reminder_text()
+                await send_reminder_message(bot, row["user_id"], text)
+            for row in promo_rows:
+                text = await reminder_text()
+                await send_reminder_message(bot, row["user_id"], text)
         except Exception as exc:
             LOG.exception("Reminder worker error: %s", exc)
         await asyncio.sleep(60)
