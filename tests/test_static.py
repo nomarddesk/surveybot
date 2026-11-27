@@ -22,3 +22,6 @@ assert not ns["valid_public_https_url"]("http://example.com")
 assert not ns["valid_public_https_url"]("https://127.0.0.1/foo")
 assert not ns["valid_public_https_url"]("https://localhost/foo")
 print("Static and pure-function tests passed")
+
+# Commands (including /admin) must bypass the generic text handler.
+assert '@router.message(StateFilter(None), F.text, ~F.text.startswith("/"))' in src.read_text(encoding="utf-8")

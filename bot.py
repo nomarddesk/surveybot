@@ -498,7 +498,27 @@ async def reward_chosen(query: CallbackQuery, bot: Bot) -> None:
     )
 
 
-@router.message(StateFilter(None), F.text)
+@router.message(Command("myid"))
+async def show_my_id(message: Message) -> None:
+    if message.from_user:
+        await message.answer(f"Your Telegram user ID: {message.from_user.id}")
+
+
+@router.message(Command("admin"))
+async def admin_panel(message: Message, state: FSMContext) -> None:
+    if not message.from_user or not is_admin(message.from_user.id):
+        await message.answer("Admin access only.")
+        return
+    await state.clear()
+    await message.answer("Network Rewards • Admin panel", reply_markup=admin_kb())
+
+
+@router.message(Command("version"))
+async def version_check(message: Message) -> None:
+    await message.answer("Network Rewards Bot V4.2 — ADMIN ROUTE FIX ACTIVE")
+
+
+@router.message(StateFilter(None), F.text, ~F.text.startswith("/"))
 async def participant_text(message: Message, bot: Bot) -> None:
     if not message.from_user:
         return
@@ -662,15 +682,6 @@ async def delete_my_data(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer("Your bot database entry and future reminders were deleted. "
                          "Admin chat copies must be removed separately; mobile subscriptions are unaffected.")
-
-
-@router.message(Command("admin"))
-async def admin_panel(message: Message, state: FSMContext) -> None:
-    if not message.from_user or not is_admin(message.from_user.id):
-        await message.answer("Admin access only.")
-        return
-    await state.clear()
-    await message.answer("Network Rewards • Admin panel", reply_markup=admin_kb())
 
 
 @router.callback_query(F.data.startswith("admin:"))
@@ -940,6 +951,7 @@ async def main() -> None:
     pool = await asyncpg.create_pool(dsn=DATABASE_URL, min_size=1, max_size=5)
     await init_db()
     bot = Bot(token=BOT_TOKEN)
+    LOG.info("BUILD VERSION: Network Rewards Bot V4.2 — ADMIN ROUTE FIX ACTIVE")
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
     workers = [asyncio.create_task(unlock_worker(bot)), asyncio.create_task(reminder_worker(bot))]
