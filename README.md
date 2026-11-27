@@ -1,49 +1,72 @@
-# Network Rewards — Railway Telegram Bot (v2)
+# Network Rewards Bot — V4 (two tasks per network)
 
-Python 3 / aiogram 3 / PostgreSQL. The bot supports MTN, Glo and Airtel with different HTTPS sponsor links and a three-part walkthrough. The promotion must have real terms and accurate subscription-charge disclosures. **It is not a payment bot and does not award prizes automatically.**
+Telegram bot for a **transparent, sponsor-supported** rewards campaign using Python 3, aiogram 3, and Railway PostgreSQL. It supports MTN/Glo/Airtel, two separately configured sponsor offers per network, two receipt uploads, a 10-second transition, admin review, and a Telegram winner-announcement channel.
 
-## Updated participant flow
+**No fake verification:** the 10-second timer only unlocks Task 2. It does not confirm a paid subscription. Both receipts stay pending until real review. The bot does not automatically pay winnings or guarantee a prize. Never label a paid mobile subscription as free.
 
-1. `/start` shows **MTN**, **Glo**, **Airtel** buttons.
-2. A selection removes the network buttons and immediately displays the chosen sponsor **URL button**, the charge/auto-renewal/cancellation explanation and a link to the official terms. There is no additional consent-button screen.
-3. An optional **subscription page** example photo appears for 3 seconds, followed by an optional **successful-registration page** example photo for 3 seconds. Each photo then disappears. If an image isn't configured, an instructional text message is shown instead.
-4. A large **OPEN MTN/GLO/AIRTEL OFFER** button appears with a 30-second visual countdown (updated every 5 seconds). **It is not a registration deadline**: the button still works after the countdown ends.
-5. **I've completed registration** shows a brief example of the carrier's successful subscription confirmation SMS, if configured. The bot requests **one screenshot of a successful subscription notification**, not a login code or security OTP. The user must hide private details.
-6. User selects cash or airtime *preference*, supplies a Nigerian phone number, and the entry is sent to admins for review. This does not guarantee winning any prize.
-7. Admin receives entry and proof with **Approve / Decline** controls. The bot tells the user that the team aims to review the submission within 24 hours. User may opt into a single 2-hour **review-status** reminder, not a prompt to purchase another subscription.
+## Participant flow
 
-## Railway setup or upgrade
+1. `/start`: select MTN, Glo or Airtel. The bot explains that each sponsor offer may charge/renew separately.
+2. Displays the actual charges/renewals for **both tasks**, including the promotion terms URL, before proceeding.
+3. **Task 1:** sponsor URL + charge/renewal/cancellation disclosure + any configured example images + 30-second *instruction* countdown (not an offer deadline). User taps **Submit Task 1 proof** and uploads a redacted carrier subscription-confirmation screenshot, **not** an SMS login/verification code.
+4. Confirmation states **“proof received, manual verification pending.”** Ten seconds later, PostgreSQL automatically unlocks **Task 2**. This is not an approval of Task 1.
+5. **Task 2:** a *different, separately configured* sponsor URL and its billing disclosure, followed by a **second** proof upload.
+6. User selects **cash/airtime preference**, provides a Nigerian contact number, and opens the partner Telegram channel where winners may be announced.
+7. **Check my channel membership** checks actual membership via Telegram's `getChatMember`. The bot must be an admin of that channel. If Telegram verification is unavailable, the user can submit for **manual** channel review; the bot does not falsely claim membership was verified.
+8. The user and admins receive an entry number. Admins see **both** proof screenshots and manually approve or decline the *entry review*. Approving does not mean money was paid.
+9. One automatic follow-up reminder is scheduled about 2 hours after start, and rescheduled after completion. Its default text makes no unverified cash-award or free-subscription claims. The prior bank-notification image is **not** automatically circulated as proof of a payout.
 
-1. Replace the bot's existing `bot.py` with the **v2** file from this archive (or deploy the entire folder).
-2. Keep the existing Railway PostgreSQL service and variables as-is:
-   - `BOT_TOKEN`: Telegram BotFather token.
-   - `ADMIN_IDS`: numeric Telegram user ID(s), comma-separated.
-   - `DATABASE_URL`: Postgres connection (e.g. Railway reference `${{Postgres.DATABASE_URL}}` if the service is named Postgres).
-3. Start command: `python bot.py`. Deploy **one replica** for polling.
-4. Open `/admin`. Your existing database records, network links and terms link remain intact.
-5. **NEW, REQUIRED:** Set **MTN billing details**, **Glo billing details**, and **Airtel billing details**, with each offer's true price, renewal behavior and cancellation instructions. The user flow will not open until that network has its sponsor URL, official terms URL and billing details saved.
-6. Optionally configure the three new image slots through `/admin`:
-   - **Set subscription step image**: example sponsor signup/confirmation page.
-   - **Set success step image**: example of the successful-registration webpage.
-   - **Set SMS proof example**: example carrier SMS screenshot showing a completed subscription (no security codes, personal numbers, or login OTPs).
-7. Test the complete flow using a separate Telegram account and read Railway deployment logs.
+## Deploy V4 on Railway
 
-For convenience, the three supplied reference images are included in the `reference_images/` folder of this ZIP. They are not published until uploaded through `/admin`.
+1. Download and extract the ZIP. **Replace your existing bot.py** in the GitHub repository with the V4 one. Keep `requirements.txt` and `Procfile`. Commit/push so Railway builds the updated code.
+2. Keep the existing Railway Postgres service and these bot-service variables:
+   - `BOT_TOKEN`: your @BotFather token, never share it.
+   - `ADMIN_IDS`: your Telegram numeric user ID(s), comma-separated.
+   - `DATABASE_URL`: reference to your project's Railway Postgres `DATABASE_URL` (e.g. `${{Postgres.DATABASE_URL}}` if the database service is named `Postgres`).
+3. Start command: `python bot.py`. Keep **one Railway worker replica** for long polling.
+4. The bot migrates the existing database automatically with `CREATE TABLE IF NOT EXISTS` / `ALTER TABLE IF NOT EXISTS`. It does **not** overwrite your existing Task 1 links, billing settings, stored receipts or completed entries.
+5. Send `/admin` in Telegram. Configure all required items below.
 
-**Important about the supplied example screenshots:** One refers to *Winna Play Daily 200*, while a different page shows *Tapestry Flash* at **₦50/day with auto-renewal**. These may not be the same offer. For user-facing guides, upload screenshots that genuinely match the active network sponsor link and the charge you've configured. The bot deliberately does **not** auto-display the supplied images without your verification.
+## Admin checklist (do this before testing)
+
+| Network | Existing Task 1 link | New Task 2 link | Task 1 billing | Task 2 billing |
+|---|---|---|---|---|
+| MTN | `URL_MTN` | `URL_MTN_2` | `BILLING_MTN` | `BILLING_MTN_2` |
+| Glo | `URL_GLO` | `URL_GLO_2` | `BILLING_GLO` | `BILLING_GLO_2` |
+| Airtel | `URL_AIRTEL` | `URL_AIRTEL_2` | `BILLING_AIRTEL` | `BILLING_AIRTEL_2` |
+
+Also set:
+
+- **Official promotion terms** (`URL_TERMS`) with genuine, current giveaway rules (eligibility, method of selecting winners, deadlines, prizes and sponsor terms). An affiliate link is **not** a substitute for published prize rules.
+- **Partner channel ID/@username** (`PARTNER_CHANNEL`), e.g. `@ExampleAnnouncements` or private channel numeric `-100...` ID.
+- **Partner channel join URL** (`PARTNER_JOIN_URL`), e.g. `https://t.me/ExampleAnnouncements` or a valid Telegram invite URL.
+- Add the bot as a **channel administrator**. Membership checking is only reliable for other users when the bot is a channel admin.
+- Optionally set `GUIDE_SUBSCRIBE_FILE_ID`, `GUIDE_SUCCESS_FILE_ID`, `GUIDE_SMS_FILE_ID` via image buttons. Examples must match the actual sponsor and charge. These are not auto-published from the ZIP.
+- Optionally change the reminder text or upload a **factual reminder picture** (truthful claims only). If a reminder image is set, the bot labels it a promotional illustration rather than evidence that anyone received a payout.
+
+Task 2 will not open if its link or its price/renewal/cancellation details are missing. Participants see both tasks' price terms upfront.
+
+## Test
+
+1. On a test Telegram account, send `/start`, choose MTN and verify both prices are displayed.
+2. Follow Task 1 **without sharing an OTP**, upload a **redacted dummy/test proof**, and verify the bot says **not yet verified**.
+3. Confirm Task 2 unlocks automatically in ~10 seconds; upload a separate test image.
+4. Choose a reward preference and contact number.
+5. Join the configured channel, click **Check my channel membership**, and verify the admin receives **two** images.
+6. Review the submission from `/admin`. Try `/resume`, `/restart`, `/privacy` and `/delete_my_data`.
+7. In Railway logs, confirm successful polling and check for errors. In PostgreSQL, inspect `campaign_progress`, `submissions` and `reminder_subscribers`.
 
 ## Commands
 
-- `/start` — Select network and begin an entry.
-- `/admin` — Network URLs, official terms URL, each network's billing details, step screenshots, review queue and stats.
-- `/privacy` — Data handling description.
-- `/delete_my_data` — Remove user's database submissions and reminders.
+- `/start` choose a network
+- `/resume` continue an interrupted task after a Railway redeploy
+- `/restart` discard an unfinished bot entry (does **not** cancel sponsor billing)
+- `/admin` manage offers and review entries
+- `/privacy` learn what data is stored
+- `/delete_my_data` delete database entries and cancel reminders; already-forwarded admin chat messages require separate removal
 
-## Security and operations
+## Privacy and accuracy
 
-- Never ask for or store security OTPs, PINs, passwords or full authentication messages. Photos go to admins, so users should redact sensitive details before uploading.
-- Guide photo IDs are stored in PostgreSQL using Telegram's file IDs. Existing `GUIDE_FILE_ID` (from v1) is used as a fallback for the first guide image unless that image is cleared.
-- Completed entries and settings are saved in PostgreSQL; in-progress conversations use memory FSM and can reset after deployments.
-- The bot does not verify sponsor transactions through an external API. Admin approval is a manual review status, not confirmation of a payout.
-- Non-pending database entries are purged after 30 days; saved copies of messages in admin Telegram chats must be cleared separately.
-- Automatic recurring-subscription reminders or hidden recurring charges are not part of the bot.
+The bot stores Telegram user ID, chosen network, two screenshots, prize preference, phone number and channel-check status. Admins receive screenshots for manual review. It does not collect authentication OTPs, PINs or passwords. It does not know whether either subscription was genuinely completed without carrier/sponsor verification. Only use genuine authorized prize claims; do not use simulated bank alerts to suggest payments have already occurred.
+
+For the partner channel check, Telegram's official API documents that `getChatMember` is guaranteed for other users only when the bot is an administrator in the channel: https://core.telegram.org/bots/api#getchatmember
